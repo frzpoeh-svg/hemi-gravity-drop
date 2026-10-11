@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>Hemi Gravity Drop</title>
+<style>
+  body {
+    margin: 0;
+    background: linear-gradient(180deg, #0a0a12 0%, #1a1a2e 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: system-ui, sans-serif;
+    color: #eee;
+  }
+  canvas {
+    border: 2px solid #444;
+    background: #0d0d1a;
+    max-width: 100%;
+    box-shadow: 0 0 20px rgba(96, 165, 250, 0.2);
+  }
+  .ui { margin-top: 12px; text-align: center; }
+  button {
+    background: #3a3a55; color: white; border: none;
+    padding: 10px 20px; margin: 4px; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: #505070; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { margin-top: 8px; font-size: 14px; color: #aaa; }
+  #leaderboard {
+    margin-top: 20px; background: #1a1a2e; padding: 12px 20px;
+    border-radius: 8px; max-width: 400px; width: 100%;
+  }
+  #leaderboard h3 { margin: 0 0 10px 0; }
+  #leaderboard ol { padding-left: 20px; margin: 0; }
+  #leaderboard li { margin: 4px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h2>Hemi Gravity Drop</h2>
+  <canvas id="game" width="480" height="640"></canvas>
+  <div class="ui">
+    <div>Score: <span id="score">0</span> | Lives: <span id="lives">3</span></div>
+    <button id="connectBtn">Connect Wallet</button>
+    <button id="startBtn" disabled>Start Game</button>
+    <button id="submitBtn" disabled>Submit Score</button>
+    <button id="refreshLb">Refresh Leaderboard</button>
+    <div id="status">Connect wallet to start</div>
+  </div>
+  <div id="leaderboard">
+    <h3>Leaderboard</h3>
+    <ol id="lbList"><li>Connect wallet to load</li></ol>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+<script>
+const CONTRACT_ADDRESS = "0xE0cCbca0Af3701d5557C2e609f021C195471AA9b";
+const ABI = [
+  "function submitScore(uint256 score) external",
+  "function getLeaderboard() external view returns (tuple(address player, uint256 score, uint256 timestamp)[15] memory, uint256)",
+  "function personalBest(address) external view returns (uint256)"
+];
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let wallet, contract, signer, provider;
+let score = 0, lives = 3, running = false;
+let platform = { x: 200, width: 110, height: 16 };
+let objects = [];
+let keys = {};
+let lastSpawn = 0;
+let speed = 2;
+let particles = [];
+
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+const audioCtx = new AudioContext();
+let musicPlaying = false;
+
+function playTone(freq, duration = 0.15, type = "sine", volume = 0.1) {
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+  } catch(e) {}
+}
+
+function startMusic() {
+  if (musicPlaying) return;
+  musicPlaying = true;
+  const notes = [220, 246.94, 261.63, 293.66, 329.63, 349.23];
+  let i = 0;
+  function loop() {
+    if (!musicPlaying) return;
+    playTone(notes[i % notes.length], 0.8, "sine", 0.04);
+    i++;
+    setTimeout(loop, 900);
+  }
+  loop();
+}
+function stopMusic() { musicPlaying = false; }
+
+function spawnObject() {
+  const types = [
+    { color: "#4ade80", points: 10 },
+    { color: "#facc15", points: 25 },
+    { color: "#f87171", points: -1 }
+  ];
+  const t = types[Math.floor(Math.random() * (Math.random() > 0.15 ? 2 : 3))];
+  objects.push({
+    x: Math.random() * (canvas.width - 30),
+    y: -30,
+    size: 24,
+    color: t.color,
+    points: t.points
+  });
+}
+
+function createParticles(x, y, color) {
+  for (let i = 0; i < 8; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: (Math.random() - 0.5) * 4,
+      life: 20,
+      color
+    });
+  }
+}
+
+function update() {
+  if (!running) return;
+
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) platform.x -= 13;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) platform.x += 13;
+  platform.x = Math.max(0, Math.min(canvas.width - platform.width, platform.x));
+
+  if (Date.now() - lastSpawn > 800) {
+    spawnObject();
+    lastSpawn = Date.now();
+  }
+
+  for (let i = objects.length - 1; i >= 0; i--) {
+    const o = objects[i];
+    o.y += speed;
+    if (o.y + o.size > canvas.height - 40 && o.y < canvas.height - 20 &&
+        o.x + o.size > platform.x && o.x < platform.x + platform.width) {
+      if (o.points > 0) {
+        score += o.points;
+        playTone(o.points > 15 ? 660 : 440, 0.12, "triangle", 0.12);
+        createParticles(o.x + o.size/2, o.y + o.size/2, o.color);
+      } else {
+        lives--;
+        playTone(180, 0.25, "sawtooth", 0.15);
+        if (lives <= 0) endGame();
+      }
+      objects.splice(i, 1);
+      document.getElementById("score").textContent = score;
+      document.getElementById("lives").textContent = lives;
+    } else if (o.y > canvas.height) {
+      if (o.points > 0) {
+        lives--;
+        playTone(150, 0.3, "square", 0.1);
+        if (lives <= 0) endGame();
+      }
+      objects.splice(i, 1);
+      document.getElementById("lives").textContent = lives;
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  speed = 2 + Math.floor(score / 150);
+  requestAnimationFrame(draw);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const grad = ctx.createLinearGradient(platform.x, canvas.height - 40, platform.x, canvas.height - 20);
+  grad.addColorStop(0, "#60a5fa");
+  grad.addColorStop(1, "#3b82f6");
+  ctx.fillStyle = grad;
+  ctx.fillRect(platform.x, canvas.height - 36, platform.width, platform.height);
+
+  objects.forEach(o => {
+    ctx.fillStyle = o.color;
+    ctx.beginPath();
+    ctx.arc(o.x + o.size/2, o.y + o.size/2, o.size/2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life / 20;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 4, 4);
+  });
+  ctx.globalAlpha = 1;
+
+  if (running) requestAnimationFrame(update);
+}
+
+function endGame() {
+  running = false;
+  stopMusic();
+  playTone(120, 0.6, "sawtooth", 0.2);
+  document.getElementById("status").textContent = `Game Over! Score: ${score}`;
+  document.getElementById("submitBtn").disabled = false;
+}
+
+window.addEventListener("keydown", e => keys[e.key] = true);
+window.addEventListener("keyup", e => keys[e.key] = false);
+
+async function loadLeaderboard() {
+  if (!contract) return;
+  try {
+    const [entries, length] = await contract.getLeaderboard();
+    const list = document.getElementById("lbList");
+    list.innerHTML = "";
+    for (let i = 0; i < length; i++) {
+      const e = entries[i];
+      const li = document.createElement("li");
+      li.textContent = `${e.player.slice(0,6)}...${e.player.slice(-4)} — ${e.score}`;
+      list.appendChild(li);
+    }
+    if (length == 0) list.innerHTML = "<li>Nessun punteggio ancora</li>";
+  } catch (e) { console.error(e); }
+}
+
+document.getElementById("connectBtn").onclick = async () => {
+  if (typeof ethers === "undefined") { alert("Errore: libreria ethers non caricata."); return; }
+  if (!window.ethereum) { alert("Nessun wallet trovato."); return; }
+  try {
+    provider = new ethers.providers.Web3Provider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    signer = provider.getSigner();
+    contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+    wallet = await signer.getAddress();
+    document.getElementById("status").textContent = "Wallet connected: " + wallet.slice(0,6) + "...";
+    document.getElementById("startBtn").disabled = false;
+    document.getElementById("connectBtn").disabled = true;
+    loadLeaderboard();
+  } catch (e) {
+    document.getElementById("status").textContent = "Errore connessione: " + e.message;
+  }
+};
+
+document.getElementById("startBtn").onclick = () => {
+  score = 0; lives = 3; objects = []; speed = 2; running = true; particles = [];
+  document.getElementById("score").textContent = 0;
+  document.getElementById("lives").textContent = 3;
+  document.getElementById("submitBtn").disabled = true;
+  document.getElementById("status").textContent = "Playing...";
+  startMusic();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  update();
+};
+
+document.getElementById("submitBtn").onclick = async () => {
+  if (!contract) return;
+  try {
+    document.getElementById("status").textContent = "Submitting score...";
+    const tx = await contract.submitScore(score);
+    await tx.wait();
+    document.getElementById("status").textContent = "Score submitted on-chain!";
+    playTone(523, 0.2, "sine", 0.15);
+    loadLeaderboard();
+  } catch (e) {
+    document.getElementById("status").textContent = "Errore: " + (e.reason || e.message);
+  }
+};
+
+document.getElementById("refreshLb").onclick = loadLeaderboard;
+draw();
+</script>
+</body>
+</html>
